@@ -1,5 +1,11 @@
+// app/chat/page.tsx
 'use client'
 
+import { useEffect, useState } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { v4 as uuidv4 } from 'uuid'
+import { Button } from '@/components/ui/button'
 import { AuthDialog } from '@/components/auth-dialog'
 import { Chat } from '@/components/chat'
 import { ChatInput } from '@/components/chat-input'
@@ -18,39 +24,16 @@ import { ExecutionResult } from '@/lib/types'
 import { DeepPartial } from 'ai'
 import { experimental_useObject as useObject } from 'ai/react'
 import { usePostHog } from 'posthog-js/react'
-import { useEffect, useState } from 'react'
 import { useLocalStorage } from 'usehooks-ts'
-import { Button } from '@/components/ui/button';
-import { useSearchParams } from 'next/navigation';
-import Link from 'next/link';
 
 export default function ChatPage() {
-    const searchParams = useSearchParams()
-
-    useEffect(() => {
-        const initialMessage = searchParams.get('initialMessage')
-        const idea = searchParams.get('idea')
-
-        if (initialMessage && idea) {
-        const message = `Based on the specification: "${initialMessage}", let's explore this idea: "${idea}"`
-        setChatInput(message)
-        
-        // Optionally, you can auto-submit the message:
-        // handleSubmitAuth({ preventDefault: () => {} } as React.FormEvent<HTMLFormElement>)
-        }
-    }, [searchParams])
+  const [sessionId, setSessionId] = useState('')
   const [chatInput, setChatInput] = useLocalStorage('chat', '')
   const [files, setFiles] = useState<File[]>([])
-  const [selectedTemplate, setSelectedTemplate] = useState<'auto' | TemplateId>(
-    'nextjs-developer',
-  )
-  const [languageModel, setLanguageModel] = useLocalStorage<LLMModelConfig>(
-    'languageModel',
-    {
-    //   model: 'claude-3-5-sonnet-20240620',
-        model: 'accounts/fireworks/models/llama-v3p1-70b-instruct',
-    },
-  )
+  const [selectedTemplate, setSelectedTemplate] = useState<'auto' | TemplateId>('auto')
+  const [languageModel, setLanguageModel] = useLocalStorage<LLMModelConfig>('languageModel', {
+    model: 'claude-3-5-sonnet-20240620',
+  })
 
   const posthog = usePostHog()
 
@@ -63,37 +46,25 @@ export default function ChatPage() {
   const [authView, setAuthView] = useState<AuthViewType>('sign_in')
   const { session, apiKey } = useAuth(setAuthDialog, setAuthView)
 
-  const currentModel = modelsList.models.find(
-    (model) => model.id === languageModel.model,
-  )
-  const currentTemplate =
-    selectedTemplate === 'auto'
-      ? templates
-      : { [selectedTemplate]: templates[selectedTemplate] }
+  const searchParams = useSearchParams()
+  const router = useRouter()
+
+  const currentModel = modelsList.models.find((model) => model.id === languageModel.model)
+  const currentTemplate = selectedTemplate === 'auto' ? templates : { [selectedTemplate]: templates[selectedTemplate] }
   const lastMessage = messages[messages.length - 1]
 
   const { object, submit, isLoading, stop, error } = useObject({
-    api:
-      currentModel?.id === 'o1-preview' || currentModel?.id === 'o1-mini'
-        ? '/api/chat-o1'
-        : '/api/chat',
+    api: currentModel?.id === 'o1-preview' || currentModel?.id === 'o1-mini' ? '/api/chat-o1' : '/api/chat',
     schema,
     onFinish: async ({ object: fragment, error }) => {
       if (!error) {
-        // send it to /api/sandbox
         console.log('fragment', fragment)
         setIsPreviewLoading(true)
-        posthog.capture('fragment_generated', {
-          template: fragment?.template,
-        })
+        posthog.capture('fragment_generated', { template: fragment?.template })
 
         const response = await fetch('/api/sandbox', {
           method: 'POST',
-          body: JSON.stringify({
-            fragment,
-            userID: session?.user?.id,
-            apiKey,
-          }),
+          body: JSON.stringify({ fragment, userID: session?.user?.id, apiKey }),
         })
 
         const result = await response.json()
@@ -108,6 +79,37 @@ export default function ChatPage() {
       }
     },
   })
+
+  useEffect(() => {
+    // Generate or retrieve session ID
+    let id = searchParams.get('session')
+    if (!id) {
+      id = uuidv4()
+      router.push(`/chat?session=${id}`)
+    }
+    setSessionId(id)
+
+    // Retrieve messages for this session
+    const storedMessages = localStorage.getItem(`chat_messages_${id}`)
+    if (storedMessages) {
+      setMessages(JSON.parse(storedMessages))
+    }
+
+    // Handle initial message and idea
+    const initialMessage = searchParams.get('initialMessage')
+    const idea = searchParams.get('idea')
+    if (idea) {
+      const message = `"${idea}"`
+      setChatInput(message)
+    }
+  }, [searchParams])
+
+  useEffect(() => {
+    // Save messages to localStorage whenever they change
+    if (sessionId) {
+      localStorage.setItem(`chat_messages_${sessionId}`, JSON.stringify(messages))
+    }
+  }, [messages, sessionId])
 
   useEffect(() => {
     if (object) {
@@ -145,9 +147,17 @@ export default function ChatPage() {
         ...previousMessages[index ?? previousMessages.length - 1],
         ...message,
       }
-
       return updatedMessages
     })
+  }
+
+  function addMessage(message: Message): Message[] {
+    let updatedMessages: Message[] = [];
+    setMessages((prevMessages) => {
+      updatedMessages = [...prevMessages, message];
+      return updatedMessages;
+    });
+    return updatedMessages;
   }
 
   async function handleSubmitAuth(e: React.FormEvent<HTMLFormElement>) {
@@ -203,11 +213,6 @@ export default function ChatPage() {
     })
   }
 
-  function addMessage(message: Message) {
-    setMessages((previousMessages) => [...previousMessages, message])
-    return [...messages, message]
-  }
-
   function handleSaveInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setChatInput(e.target.value)
   }
@@ -217,9 +222,7 @@ export default function ChatPage() {
   }
 
   function logout() {
-    supabase
-      ? supabase.auth.signOut()
-      : console.warn('Supabase is not initialized')
+    supabase ? supabase.auth.signOut() : console.warn('Supabase is not initialized')
   }
 
   function handleLanguageModelChange(e: LLMModelConfig) {
@@ -247,6 +250,7 @@ export default function ChatPage() {
     setResult(undefined)
     setCurrentTab('code')
     setIsPreviewLoading(false)
+    localStorage.removeItem(`chat_messages_${sessionId}`)
   }
 
   function setCurrentPreview(preview: {
@@ -264,9 +268,10 @@ export default function ChatPage() {
 
   return (
     <main className="flex min-h-screen max-h-screen">
-      <Link href="/" className="absolute top-4 left-4 z-10">
+      <Link href={`/?session=${sessionId}`} className="absolute top-4 left-4 z-10">
         <Button variant="outline">Back to Idea Generator</Button>
       </Link>
+
       {supabase && (
         <AuthDialog
           open={isAuthDialogOpen}
@@ -277,7 +282,9 @@ export default function ChatPage() {
       )}
       <div className="grid w-full md:grid-cols-2">
         <div
-          className={`flex flex-col w-full max-h-full max-w-[800px] mx-auto px-4 overflow-auto ${fragment ? 'col-span-1' : 'col-span-2'}`}
+          className={`flex flex-col w-full max-h-full max-w-[800px] mx-auto px-4 overflow-auto ${
+            fragment ? 'col-span-1' : 'col-span-2'
+          }`}
         >
           <NavBar
             session={session}
